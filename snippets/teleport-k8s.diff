@@ -41,6 +41,131 @@ index 3244e104ba..0d7932a970 100644
  github.com/jonboulle/clockwork v0.5.0 h1:Hyh9A8u51kptdkR+cqRpT1EebBwTn1oK9YfGYbdFz6I=
  github.com/jonboulle/clockwork v0.5.0/go.mod h1:3mZlmanh0g2NDKO5TWZVJAfofYk64M7XN3SzBPjZF60=
  github.com/josharian/intern v1.0.0 h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=
+diff --git a/lib/client/trusted_certs_store.go b/lib/client/trusted_certs_store.go
+index 24dede0c3a..6213e99902 100644
+--- a/lib/client/trusted_certs_store.go
++++ b/lib/client/trusted_certs_store.go
+@@ -392,6 +392,7 @@ func (fs *FSTrustedCertsStore) addKnownHosts(proxyHost string, cas []authclient.
+ 	// add every host key to the list of entries
+ 	for _, ca := range cas {
+ 		for _, hostKey := range ca.AuthorizedKeys {
++			fs.log.DebugContext(context.Background(), "🐛 Starting to store host...")
+ 			fs.log.DebugContext(context.Background(), "Adding known host entry",
+ 				"cluster_name", ca.ClusterName,
+ 				"proxy", proxyHost,
+diff --git a/lib/kube/dev-pod-reader-binding.yaml b/lib/kube/dev-pod-reader-binding.yaml
+new file mode 100644
+index 0000000000..60c874b333
+--- /dev/null
++++ b/lib/kube/dev-pod-reader-binding.yaml
+@@ -0,0 +1,34 @@
++apiVersion: rbac.authorization.k8s.io/v1
++kind: RoleBinding
++metadata:
++  name: dev-pod-reader-binding
++  namespace: dev
++subjects:
++  - kind: Group
++    name: dev-pod-reader   # Teleport Role의 kubernetes_groups와 일치
++    apiGroup: rbac.authorization.k8s.io
++  - kind: User
++    name: testuser         # 정확한 사용자명 (kubectl config view 에서 확인)
++    apiGroup: rbac.authorization.k8s.io
++roleRef:
++  kind: Role
++  name: dev-pod-reader
++  apiGroup: rbac.authorization.k8s.io
++
++---
++apiVersion: rbac.authorization.k8s.io/v1
++kind: RoleBinding
++metadata:
++  name: dev-pod-reader-binding
++  namespace: kube-system
++subjects:
++  - kind: Group
++    name: dev-pod-reader
++    apiGroup: rbac.authorization.k8s.io
++  - kind: User
++    name: testuser
++    apiGroup: rbac.authorization.k8s.io
++roleRef:
++  kind: Role
++  name: dev-pod-reader
++  apiGroup: rbac.authorization.k8s.io
+diff --git a/lib/kube/dev-pod-reader-roles.yaml b/lib/kube/dev-pod-reader-roles.yaml
+new file mode 100644
+index 0000000000..0b81fdcbd2
+--- /dev/null
++++ b/lib/kube/dev-pod-reader-roles.yaml
+@@ -0,0 +1,20 @@
++apiVersion: rbac.authorization.k8s.io/v1
++kind: Role
++metadata:
++  name: dev-pod-reader
++  namespace: dev
++rules:
++  - apiGroups: [""]
++    resources: ["pods"]
++    verbs: ["get", "list", "watch"]
++
++---
++apiVersion: rbac.authorization.k8s.io/v1
++kind: Role
++metadata:
++  name: dev-pod-reader
++  namespace: kube-system
++rules:
++  - apiGroups: [""]
++    resources: ["pods"]
++    verbs: ["get", "list", "watch"]
+diff --git a/lib/kube/dev-pod-reader.yaml b/lib/kube/dev-pod-reader.yaml
+new file mode 100644
+index 0000000000..e4ba30209b
+--- /dev/null
++++ b/lib/kube/dev-pod-reader.yaml
+@@ -0,0 +1,41 @@
++kind: role
++metadata:
++  name: dev-pod-reader
++version: v8
++spec:
++  allow:
++    kubernetes_labels:
++      '*': '*'
++    kubernetes_resources:
++      # Pods
++      - kind: pods
++        namespace: dev
++        name: "*"
++        verbs: ["*"]
++        api_group: ""
++      - kind: pods
++        namespace: kube-system
++        name: "*"
++        verbs: ["*"]
++        api_group: ""
++      # Roles
++      - kind: roles
++        namespace: dev
++        name: "*"
++        verbs: ["*"]
++        api_group: rbac.authorization.k8s.io
++      # RoleBindings
++      - kind: rolebindings
++        namespace: dev
++        name: "*"
++        verbs: ["*"]
++        api_group: rbac.authorization.k8s.io
++    kubernetes_groups:
++      - dev-pod-reader
++  deny:
++    kubernetes_resources:
++      - kind: "*"
++        namespace: "ops"
++        name: "*"
++        verbs: ["*"]
++        api_group: "*"   # 여기 추가
 diff --git a/lib/kube/watcher/match_go_role_test.go b/lib/kube/watcher/match_go_role_test.go
 new file mode 100644
 index 0000000000..a98f929f0a
@@ -102,29 +227,36 @@ index 0000000000..a98f929f0a
 +}
 diff --git a/lib/kube/watcher/match_pod_role.go b/lib/kube/watcher/match_pod_role.go
 new file mode 100644
-index 0000000000..abd40512e6
+index 0000000000..5039c97a1f
 --- /dev/null
 +++ b/lib/kube/watcher/match_pod_role.go
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,125 @@
 +package watcher
 +
 +import (
 +	"bytes"
 +	"context"
 +	"fmt"
++	"io"
++	"log"
++	"net/http"
++
 +	"github.com/goccy/go-json"
 +	"github.com/gravitational/teleport/api/types"
 +	"github.com/gravitational/teleport/lib/services"
 +	"github.com/gravitational/trace"
-+	"io"
-+	"log"
-+	"net/http"
 +)
 +
 +// MatchPodAccessAndNotify checks if the user is allowed to access the specified pod.
 +// If access is denied, it logs the denial and optionally sends an alert (e.g., Slack, email, webhook).
 +// If access is granted, it logs the successful access.
-+func MatchPodAccessAndNotify(ctx context.Context, pod types.KubernetesResource, cluster types.KubeCluster, roleSet services.RoleSet, userTraits map[string][]string, webhookURL string) error {
++func MatchPodAccessAndNotify(
++	ctx context.Context,
++	podResource PodResourceWithLabels,
++	roleSet services.RoleSet,
++	userTraits map[string][]string,
++	clusterName string,
++	webhookURL string) error {
 +	//podResource := types.KubernetesResource{
 +	//	Kind:      "pods",
 +	//	Namespace: pod.Namespace,
@@ -140,15 +272,46 @@ index 0000000000..abd40512e6
 +	//	log.Error(err)
 +	//	return
 +	//}
-+	err := roleSet.CheckAccessToPod(ctx, cluster, pod, userTraits)
++
++	cluster, err := types.NewKubernetesClusterV3(types.Metadata{
++		Name:   clusterName,
++		Labels: map[string]string{}, // 빈 map으로 둠, 필요 시 실제 레이블 넣기
++	}, types.KubernetesClusterSpecV3{})
++	if err != nil {
++		log.Printf("Failed to create cluster object: %v", err)
++		return trace.Wrap(err)
++	}
++
++	kubernetesResource := types.KubernetesResource{
++		Kind:      podResource.Kind,
++		Namespace: podResource.Namespace,
++		Name:      podResource.Name,
++		Verbs:     []string{"get", "list"}, // Default verbs for pod access check
++	}
++
++	// Create a dummy cluster for access check
++	// TODO: Get actual cluster information from current session
++	/*cluster, err := types.NewKubernetesClusterV3(types.Metadata{
++		Name:   "default-cluster",                      // This should come from user session
++		Labels: map[string]string{"env": "production"}, // This should come from actual cluster metadata
++	}, types.KubernetesClusterSpecV3{})
++	if err != nil {
++		log.Printf("Failed to create cluster object: %v", err)
++		return trace.Wrap(err)
++	}*/
++
++	log.Printf("Checking access for pod: %s/%s with labels: %v, clusterName: %s",
++		podResource.Namespace, podResource.Name, podResource.Labels, cluster.GetName())
++
++	err = roleSet.CheckAccessToPod(ctx, cluster, kubernetesResource, userTraits)
 +	// CheckAccessToPod checks if the user has access to the specified pod.
 +	if err != nil {
 +		if trace.IsAccessDenied(err) {
 +			// Access denied — log the event
-+			log.Printf("Access DENIED to pod %q: %v", pod.Name, err)
++			log.Printf("❌ Access DENIED to pod %s/%s: %v", podResource.Namespace, podResource.Name, err)
 +
 +			if webhookURL != "" {
-+				msg := fmt.Sprintf("Access DENIED to pod: %s in namespace: %s", pod.Name, pod.Namespace)
++				msg := fmt.Sprintf("Access DENIED to pod: %s in namespace: %s", podResource.Name, podResource.Namespace)
 +				if err := sendWebhookAlert(webhookURL, msg); err != nil {
 +					log.Printf("❗️ Failed to send webhook alert: %v", err)
 +				}
@@ -161,7 +324,7 @@ index 0000000000..abd40512e6
 +	}
 +
 +	// Access granted — log the event
-+	log.Printf("Access ALLOWED to pod %q", pod.Name)
++	log.Printf("⭐️ Access ALLOWED to pod %q", podResource.Name)
 +	return nil
 +}
 +
@@ -242,18 +405,22 @@ index 0000000000..fe45cff669
 +}
 diff --git a/lib/kube/watcher/watcher.go b/lib/kube/watcher/watcher.go
 new file mode 100644
-index 0000000000..c106181ba4
+index 0000000000..1595d07cef
 --- /dev/null
 +++ b/lib/kube/watcher/watcher.go
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,188 @@
 +package watcher
 +
 +import (
 +	"context"
++	"encoding/json"
 +	"fmt"
 +	"log"
++	"sync"
 +	"time"
 +
++	"github.com/gravitational/teleport/api/types"
++	"github.com/gravitational/teleport/lib/services"
 +	corev1 "k8s.io/api/core/v1"
 +	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 +	"k8s.io/client-go/kubernetes"
@@ -262,9 +429,74 @@ index 0000000000..c106181ba4
 +	"k8s.io/client-go/util/homedir"
 +)
 +
++type PodResourceWithLabels struct {
++	types.KubernetesResource
++	Labels map[string]string `json:"labels,omitempty"`
++}
++
++type UserSession struct {
++	Username   string
++	RoleSet    services.RoleSet
++	UserTraits map[string][]string
++	Cluster    string
++	ProxyURL   string
++	LoginTime  time.Time
++}
++
++var (
++	currentUserSession *UserSession
++	sessionMutex       sync.RWMutex
++)
++
++var (
++	cancelFunc context.CancelFunc
++	cancelOnce sync.Once
++)
++
++func UpdateUserSession(session *UserSession) {
++	sessionMutex.Lock()
++	defer sessionMutex.Unlock()
++	currentUserSession = session
++	log.Printf("💻 [UpdateUserSession] Session set for user: %s", session.Username)
++	log.Printf("💻 [UpdateUserSession] Session set for user: %s", session.Cluster)
++	log.Printf("💻 [UpdateUserSession] Session set for user: %s", session.RoleSet)
++	log.Printf("💻 [UpdateUserSession] Session set for user: %s", session.UserTraits)
++}
++
++func GetCurrentUserSession() *UserSession {
++	sessionMutex.RLock()
++	defer sessionMutex.RUnlock()
++	if currentUserSession == nil {
++		log.Println("💻 [GetCurrentUserSession] currentUserSession is nil")
++	} else {
++		log.Printf("💻 [GetCurrentUserSession] currentUserSession for user: %s", currentUserSession.Username)
++	}
++	return currentUserSession
++}
++
++func StringsToRoleSet(roles []string) services.RoleSet {
++	roleSet := make(services.RoleSet, 0, len(roles))
++	for _, roleName := range roles {
++		roleSet = append(roleSet, &types.RoleV6{
++			Metadata: types.Metadata{
++				Name: roleName,
++			},
++		})
++	}
++	return roleSet
++}
++
 +func StartPodWatcher(ctx context.Context, webhookURL string) error {
-+	log.Println("Waiting for Teleport to be ready...")
-+	time.Sleep(10 * time.Second)
++
++	log.Println("🚀 [StartPodWatcher] Pod watcher started")
++
++	session := GetCurrentUserSession()
++	if session == nil {
++		log.Println("🚫 [StartPodWatcher] No user session available")
++		return nil
++	}
++
++	log.Printf("✅ [StartPodWatcher] Found user session for: %s", session.Username)
 +
 +	var kubeconfig string
 +	if home := homedir.HomeDir(); home != "" {
@@ -290,8 +522,6 @@ index 0000000000..c106181ba4
 +	}
 +	defer watcher.Stop()
 +
-+	log.Println("Pod watcher started...")
-+
 +	for event := range watcher.ResultChan() {
 +		pod, ok := event.Object.(*corev1.Pod)
 +		if !ok {
@@ -303,20 +533,66 @@ index 0000000000..c106181ba4
 +		namespace := pod.GetNamespace()
 +		labels := pod.GetLabels()
 +
++		/*kubernetesResource := types.KubernetesResource{
++			Kind:      "pods",
++			Name:      podName,
++			Namespace: namespace,
++		}
++
++		PodResourceWithLabels := PodResourceWithLabels{
++			KubernetesResource: kubernetesResource,
++			Labels:             labels,
++		}*/
++
++		PodResourceWithLabels := PodResourceWithLabels{
++			KubernetesResource: types.KubernetesResource{
++				Kind:      "pods",
++				Name:      podName,
++				Namespace: namespace,
++			},
++			Labels: labels,
++		}
++
++		userSession := GetCurrentUserSession()
++		if userSession != nil {
++			log.Printf("Checking pod access for user: %s", userSession.Username)
++			err := MatchPodAccessAndNotify(
++				ctx,
++				PodResourceWithLabels,
++				userSession.RoleSet,
++				userSession.UserTraits,
++				userSession.Cluster,
++				webhookURL,
++			)
++			if err != nil {
++				log.Printf("Failed to match pod access: %v", err)
++			}
++		} else {
++			log.Println("🚨 No user session available, skipping access check")
++		}
++
++		resourceJSON, err := json.MarshalIndent(PodResourceWithLabels, "", " ")
++		if err != nil {
++			log.Printf("Failed to marshal PodResourceWithLabels: %v", err)
++			continue
++		}
++
 +		labelStr := ""
 +		for k, v := range labels {
 +			labelStr += fmt.Sprintf("%s=%s ", k, v)
 +		}
 +
 +		message := fmt.Sprintf(
-+			"*[%s]* Pod: `%s`\nNamespace: `%s`\nLabels: `%s`\nTime: %s",
-+			eventType, podName, namespace, labelStr, time.Now().Format(time.RFC3339),
++			"*[%s]* PodResourceWithLabels:\n```json\n%s\n```\nTime: %s",
++			eventType, string(resourceJSON), time.Now().Format(time.RFC3339),
 +		)
 +
-+		err := sendSlackNotification(webhookURL, message)
++		err = sendSlackNotification(webhookURL, message)
 +		if err != nil {
 +			log.Printf("Failed to send Slack notification: %v", err)
 +		}
++
++		log.Printf("Pod event: %s - %s/%s with labels: %v", eventType, namespace, podName, labels)
 +	}
 +
 +	return nil
@@ -494,33 +770,145 @@ index 7357530588..e7362149e6 100644
  
  func boolsToSlice(v ...bool) []bool {
  	return v
+diff --git a/lib/web/apiserver.go b/lib/web/apiserver.go
+index 4a7486785f..bc4efd277a 100644
+--- a/lib/web/apiserver.go
++++ b/lib/web/apiserver.go
+@@ -30,6 +30,7 @@ import (
+ 	"fmt"
+ 	"html/template"
+ 	"io"
++	"log"
+ 	"log/slog"
+ 	"math/rand/v2"
+ 	"net"
+@@ -89,6 +90,7 @@ import (
+ 	"github.com/gravitational/teleport/lib/httplib"
+ 	"github.com/gravitational/teleport/lib/httplib/csrf"
+ 	"github.com/gravitational/teleport/lib/jwt"
++	"github.com/gravitational/teleport/lib/kube/watcher"
+ 	"github.com/gravitational/teleport/lib/limiter"
+ 	"github.com/gravitational/teleport/lib/modules"
+ 	"github.com/gravitational/teleport/lib/multiplexer"
+@@ -2465,6 +2467,7 @@ func newSessionResponse(sctx *SessionContext) (*CreateSessionResponse, error) {
+ //
+ // {"type": "bearer", "token": "bearer token", "user": {"name": "alex", "allowed_logins": ["admin", "bob"]}, "expires_in": 20}
+ func (h *Handler) createWebSession(w http.ResponseWriter, r *http.Request, p httprouter.Params) (any, error) {
++	log.Println("🐛 [createWebSession] called")
+ 	var req *CreateSessionReq
+ 	if err := httplib.ReadResourceJSON(r, &req); err != nil {
+ 		return nil, trace.Wrap(err)
+@@ -2512,7 +2515,42 @@ func (h *Handler) createWebSession(w http.ResponseWriter, r *http.Request, p htt
+ 		return nil, trace.AccessDenied("need auth")
+ 	}
+ 
++	accessChecker, err := ctx.GetUserAccessChecker()
++	if err != nil {
++		h.logger.WarnContext(r.Context(), "Failed to get access checker", "user", req.User, "error", err)
++		return nil, trace.Wrap(err)
++	}
++
++	clt, err := ctx.GetClient()
++	if err != nil {
++		return nil, trace.Wrap(err)
++	}
++	clusterName, err := clt.GetClusterName(r.Context())
++	if err != nil {
++		return nil, trace.Wrap(err)
++	}
++
++	clusterNameStr := clusterName.GetClusterName()
++
++	watcher.UpdateUserSession(&watcher.UserSession{
++		Username:   req.User,
++		Cluster:    clusterNameStr,
++		RoleSet:    accessChecker.Roles(),
++		UserTraits: accessChecker.Traits(),
++	})
++
++	webhookURL := os.Getenv("SLACK_WEBHOOK_URL")
++
++	go func() {
++		err := watcher.StartPodWatcher(context.Background(), webhookURL)
++		if err != nil {
++			log.Printf("error: %v", err)
++		}
++	}()
++
++	log.Println("👽 Before newSessionResponse")
+ 	res, err := newSessionResponse(ctx)
++	log.Println("👽 After newSessionResponse, returning response")
+ 	return res, trace.Wrap(err)
+ }
+ 
+diff --git a/lib/web/app/handler.go b/lib/web/app/handler.go
+index 2429fcc27e..acc3e87332 100644
+--- a/lib/web/app/handler.go
++++ b/lib/web/app/handler.go
+@@ -25,6 +25,7 @@ import (
+ 	"crypto/tls"
+ 	"fmt"
+ 	"io"
++	"log"
+ 	"log/slog"
+ 	"net"
+ 	"net/http"
+@@ -145,11 +146,25 @@ func NewHandler(ctx context.Context, c *HandlerConfig) (*Handler, error) {
+ 	h.router.GET("/x-teleport-auth", makeRouterHandler(h.startAppAuthExchange))
+ 	h.router.POST("/x-teleport-auth", makeRouterHandler(h.completeAppAuthExchange))
+ 	h.router.GET("/teleport-logout", h.withRouterAuth(h.handleLogout))
++	h.router.POST("/v1/testapi/sessions/web", makeRouterHandler(h.createWebSessionHandler))
+ 	h.router.NotFound = h.withAuth(h.handleHttp)
+ 
+ 	return h, nil
+ }
+ 
++func (h *Handler) createWebSessionHandler(w http.ResponseWriter, r *http.Request, p httprouter.Params) error {
++	log.Println("🐛 [Custom Web Session Handler] called")
++
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(http.StatusOK)
++	_, err := w.Write([]byte(`{"message":"✅ Custom web session created"}`))
++	if err != nil {
++		log.Println("write error:", err)
++		return trace.Wrap(err)
++	}
++	return nil
++}
++
+ // ServeHTTP hands the request to the request router.
+ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 	h.router.ServeHTTP(w, r)
+diff --git a/lib/web/app/middleware.go b/lib/web/app/middleware.go
+index 2d364e8bc1..64c5221126 100644
+--- a/lib/web/app/middleware.go
++++ b/lib/web/app/middleware.go
+@@ -19,6 +19,7 @@
+ package app
+ 
+ import (
++	"log"
+ 	"net/http"
+ 
+ 	"github.com/gravitational/trace"
+@@ -102,6 +103,7 @@ func (h *Handler) redirectToLauncher(w http.ResponseWriter, r *http.Request, p l
+ func makeRouterHandler(handler routerFunc) httprouter.Handle {
+ 	return func(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
+ 		if err := handler(w, r, p); err != nil {
++			log.Printf("[makeRouterHandler] handler error: %v\n", err)
+ 			writeError(w, err)
+ 			return
+ 		}
 diff --git a/tool/teleport/common/teleport.go b/tool/teleport/common/teleport.go
-index 6897e94b3a..473d9c9c70 100644
+index 6897e94b3a..4a4fbc5445 100644
 --- a/tool/teleport/common/teleport.go
 +++ b/tool/teleport/common/teleport.go
-@@ -33,6 +33,7 @@ import (
- 	"slices"
- 	"strconv"
- 	"strings"
-+	"time"
- 
- 	"github.com/alecthomas/kingpin/v2"
- 	"github.com/gravitational/trace"
-@@ -58,6 +59,8 @@ import (
- 	"github.com/gravitational/teleport/lib/utils"
- 	logutils "github.com/gravitational/teleport/lib/utils/log"
- 	"github.com/gravitational/teleport/lib/versioncontrol"
-+
-+	"github.com/gravitational/teleport/lib/kube/watcher"
- )
- 
- const selinuxUnsupportedErr = "--enable-selinux is allowed only when the SSH service is the only service enabled"
-@@ -816,6 +819,22 @@ func OnStart(clf config.CommandLineFlags, config *servicecfg.Config) error {
+@@ -816,6 +816,22 @@ func OnStart(clf config.CommandLineFlags, config *servicecfg.Config) error {
  	} else {
  		config.Logger.InfoContext(ctx, "Starting Teleport with a config file", "version", teleport.Version, "config_file", configFileUsed)
  	}
 +
-+	webhookURL := os.Getenv("SLACK_WEBHOOK_URL")
++	/*webhookURL := os.Getenv("SLACK_WEBHOOK_URL")
 +	config.Logger.InfoContext(ctx, "DEBUG: SLACK_WEBHOOK_URL value", "url", webhookURL, "length", len(webhookURL))
 +
 +	if webhookURL != "" {
@@ -533,8 +921,31 @@ index 6897e94b3a..473d9c9c70 100644
 +		}()
 +	} else {
 +		config.Logger.InfoContext(ctx, "Pod watcher disabled - no SLACK_WEBHOOK_URL provided")
-+	}
++	} */
 +
  	return service.Run(ctx, *config, nil)
  }
  
+diff --git a/tool/tsh/common/tsh.go b/tool/tsh/common/tsh.go
+index 0d2ca27c1f..4dd13e37d5 100644
+--- a/tool/tsh/common/tsh.go
++++ b/tool/tsh/common/tsh.go
+@@ -50,6 +50,7 @@ import (
+ 	"github.com/google/uuid"
+ 	"github.com/gravitational/trace"
+ 	"github.com/jonboulle/clockwork"
++	"github.com/sirupsen/logrus"
+ 	"go.opentelemetry.io/otel/attribute"
+ 	oteltrace "go.opentelemetry.io/otel/trace"
+ 	"golang.org/x/crypto/ssh"
+@@ -2041,6 +2042,10 @@ func serializeVersion(format string, proxyVersion string, proxyPublicAddress str
+ 
+ // onLogin logs in with remote proxy and gets signed certificates
+ func onLogin(cf *CLIConf, reExecArgs ...string) error {
++	logrus.WithFields(logrus.Fields{
++		"proxy":    cf.Proxy,
++		"username": cf.Username,
++	}).Debug("🐛 [DEBUG] inside onLogin() with CLIConf")
+ 	autoRequest := true
+ 	// special case: --request-roles=no disables auto-request behavior.
+ 	if cf.DesiredRoles == "no" {
