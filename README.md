@@ -4,6 +4,8 @@ This project extends the Teleport open source platform by adding Kubernetes Pod 
 
 The implementation is based on a fork of the Teleport repository and focuses on enhancing Kubernetes observability and access governance using real cluster sessions rather than dummy or mock clusters.
 
+![Teleport-Pod-Watcher (1)](https://github.com/user-attachments/assets/31597a71-0f5a-4029-9abe-1ae26cc5b576)
+
 ## 🚀 Key Features
 ### 1. Kubernetes Pod Event Watcher (client-go)
 
@@ -31,7 +33,7 @@ The implementation is based on a fork of the Teleport repository and focuses on 
   lib/services/role.go
   ```
 
-### 3. Role-Based Access Enforcement
+### 3. Role Based Access Enforcement
 
 - Extended Teleport’s role service to support Pod access validation
 
