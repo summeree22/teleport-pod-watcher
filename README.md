@@ -23,7 +23,7 @@ The implementation is based on a fork of the Teleport repository and focuses on 
 
 - Introduced logic to map Kubernetes Pod labels to Teleport Roles
 
-- Enables fine-grained Pod-level access control
+- Enables fine grained Pod level access control
 
 - Access decisions are evaluated dynamically when Pod events occur
 
@@ -101,7 +101,7 @@ lib/
 │       └── *_test.go           # Unit tests
 │
 ├── services/
-│   └── role.go                 # Extended role-based Pod access control
+│   └── role.go                 # Extended role based Pod access control
 │
 tool/teleport/common/
 └── teleport.go                 # Teleport integration updates
@@ -109,7 +109,7 @@ tool/teleport/common/
 
 ## 🎯 Motivation
 
-Teleport provides strong identity-based access control, but Kubernetes access is often namespace or cluster level.
+Teleport provides strong identity based access control, but Kubernetes access is often namespace or cluster level.
 
 This project explores:
 
@@ -129,7 +129,7 @@ This project explores:
 
 - Kubernetes client-go
 
-- Minikube / Local K8s
+- Minikube / Local K8S
 
 - Slack Webhook
 
@@ -147,5 +147,5 @@ This project explores:
 
 ### ⚠️ Disclaimer
 
-This repository is a personal experimental fork of the Teleport open-source project.
+This repository is a personal experimental fork of the Teleport open source project.
 It is not an official Teleport feature and is intended for learning, prototyping, and exploration.
