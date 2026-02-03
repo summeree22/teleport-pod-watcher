@@ -1,92 +1,95 @@
-Teleport Kubernetes Pod Watcher Extension
+# Teleport Kubernetes Pod Watcher Extension
 
-This project extends the Teleport open-source platform by adding Kubernetes Pod-level event monitoring and role-based access control, integrated with Teleport roles and external notifications (Slack).
+This project extends the Teleport open source platform by adding Kubernetes Pod level event monitoring and role based access control, integrated with Teleport roles and external notifications (Slack).
 
 The implementation is based on a fork of the Teleport repository and focuses on enhancing Kubernetes observability and access governance using real cluster sessions rather than dummy or mock clusters.
 
-🚀 Key Features
-1. Kubernetes Pod Event Watcher (client-go)
+## 🚀 Key Features
+### 1. Kubernetes Pod Event Watcher (client-go)
 
-Implemented a Kubernetes Pod watcher using client-go
+- Implemented a Kubernetes Pod watcher using client-go
 
-Detects Pod lifecycle events (create / update / delete)
+- Detects Pod lifecycle events (create / update / delete)
 
-Designed to run against real session-based Kubernetes clusters
+- Designed to run against real session-based Kubernetes clusters
+- Located in:
+  ```text
+  lib/kube/watcher/watcher.go
+  ```
 
-Located in:
+### 2. Pod Label ↔ Teleport Role Matching
 
-lib/kube/watcher/watcher.go
+- Introduced logic to map Kubernetes Pod labels to Teleport Roles
 
-2. Pod Label ↔ Teleport Role Matching
+- Enables fine-grained Pod-level access control
 
-Introduced logic to map Kubernetes Pod labels to Teleport Roles
+- Access decisions are evaluated dynamically when Pod events occur
 
-Enables fine-grained Pod-level access control
+- Core logic implemented in:
+  ```text
+  lib/kube/watcher/match_pod_role.go
+  lib/services/role.go
+  ```
 
-Access decisions are evaluated dynamically when Pod events occur
+### 3. Role-Based Access Enforcement
 
-Core logic implemented in:
+- Extended Teleport’s role service to support Pod access validation
 
-lib/kube/watcher/match_pod_role.go
-lib/services/role.go
+- Determines whether a Teleport role is allowed to access a specific Pod
 
-3. Role-Based Access Enforcement
+- Related files:
+  ```text
+  lib/services/role.go
+  lib/services/role_test.go
+  ```
 
-Extended Teleport’s role service to support Pod access validation
+### 4. External Notification (Slack Integration)
 
-Determines whether a Teleport role is allowed to access a specific Pod
+- Added a notifier module to send real time alerts when:
 
-Fully unit-tested to ensure correctness
+  -  Unauthorized Pod access is detected
 
-Related files:
+  -  Role Pod matching rules are triggered
 
-lib/services/role.go
-lib/services/role_test.go
+- Currently supports Slack Webhook
 
-4. External Notification (Slack Integration)
+- Implemented in:
+  ```text
+  lib/kube/watcher/notifier.go
+  ```
 
-Added a notifier module to send real-time alerts when:
+### 5. Real Cluster Integration
 
-Unauthorized Pod access is detected
+- Designed to work with:
 
-Role-Pod matching rules are triggered
+  -  Minikube
 
-Currently supports Slack Webhook
+  - Local Kubernetes clusters
 
-Implemented in:
+  - Externally accessible API servers
 
-lib/kube/watcher/notifier.go
+- Integrated with Teleport’s session context
 
-5. Real Cluster Integration
+- Suitable for real operational environments
 
-Designed to work with:
+## 🧪 Tests & Validation
 
-Minikube
+- Added unit tests for:
 
-Local Kubernetes clusters
+- Pod ↔ Role matching logic
 
-Externally accessible API servers
+  - Role access validation
 
-Integrated with Teleport’s actual session context, not a dummy cluster
+  - Test coverage ensures safe integration with Teleport core
 
-Suitable for real operational environments
+- Example test files:
+  ```text
+  lib/kube/watcher/match_pod_role_test.go
+  lib/services/role_test.go
+  ```
 
-🧪 Tests & Validation
-
-Added unit tests for:
-
-Pod ↔ Role matching logic
-
-Role access validation
-
-Test coverage ensures safe integration with Teleport core
-
-Example test files:
-
-lib/kube/watcher/match_pod_role_test.go
-lib/services/role_test.go
-
-📂 Modified / Added Files Summary
+## 📂 Modified / Added Files Summary
+```text
 lib/
 ├── kube/
 │   └── watcher/
@@ -100,46 +103,47 @@ lib/
 │
 tool/teleport/common/
 └── teleport.go                 # Teleport integration updates
+```
 
-🎯 Motivation
+## 🎯 Motivation
 
-Teleport provides strong identity-based access control, but Kubernetes access is often namespace- or cluster-level.
+Teleport provides strong identity-based access control, but Kubernetes access is often namespace or cluster level.
 
 This project explores:
 
-Pod-level security
+- Pod level security
 
-Label-driven access policies
+- Label driven access policies
 
-Real-time visibility into Kubernetes activity
+- Real time visibility into Kubernetes activity
 
-Operational alerts for security and compliance
+- Operational alerts for security and compliance
 
-🛠 Tech Stack
+## 🛠 Tech Stack
 
-Go
+- Go
 
-Teleport (Open Source)
+- Teleport (Open Source)
 
-Kubernetes client-go
+- Kubernetes client-go
 
-Minikube / Local K8s
+- Minikube / Local K8s
 
-Slack Webhook
+- Slack Webhook
 
-⚠️ Disclaimer
+## ✨ What This Demonstrates
+
+- Deep understanding of Teleport internals
+
+- Kubernetes client-go event handling
+
+- Role based access control design
+
+- Open source contribution & extension
+
+- Production oriented thinking (real clusters, alerts, tests)
+
+### ⚠️ Disclaimer
 
 This repository is a personal experimental fork of the Teleport open-source project.
 It is not an official Teleport feature and is intended for learning, prototyping, and exploration.
-
-✨ What This Demonstrates
-
-Deep understanding of Teleport internals
-
-Kubernetes client-go event handling
-
-Role-based access control design
-
-Open-source contribution & extension
-
-Production-oriented thinking (real clusters, alerts, tests)
