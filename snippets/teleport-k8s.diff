@@ -1,0 +1,540 @@
+diff --git a/go.mod b/go.mod
+index 534f054e56..57ddd65570 100644
+--- a/go.mod
++++ b/go.mod
+@@ -264,6 +264,11 @@ require (
+ 	software.sslmate.com/src/go-pkcs12 v0.5.0
+ )
+ 
++require (
++	github.com/goccy/go-json v0.10.5
++	github.com/joho/godotenv v1.5.1
++)
++
+ require (
+ 	cel.dev/expr v0.23.1 // indirect
+ 	cloud.google.com/go v0.121.1 // indirect
+@@ -385,7 +390,6 @@ require (
+ 	github.com/gobwas/glob v0.2.3 // indirect
+ 	github.com/gobwas/httphead v0.1.0 // indirect
+ 	github.com/gobwas/pool v0.2.1 // indirect
+-	github.com/goccy/go-json v0.10.5 // indirect
+ 	github.com/godbus/dbus v0.0.0-20190726142602-4481cbc300e2 // indirect
+ 	github.com/godbus/dbus/v5 v5.1.0 // indirect
+ 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
+@@ -612,3 +616,5 @@ replace (
+ // when evaluating versions; "go get -u ./..." succeeding is a good sign that
+ // the problem has been resolved
+ exclude google.golang.org/grpc/stats/opentelemetry v0.0.0-20241028142157-ada6787961b3
++
++replace github.com/gravitational/teleport => ./
+diff --git a/go.sum b/go.sum
+index 3244e104ba..0d7932a970 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1732,6 +1732,8 @@ github.com/jmoiron/sqlx v1.4.0 h1:1PLqN7S1UYp5t4SrVVnt4nUVNemrDAtxlulVe+Qgm3o=
+ github.com/jmoiron/sqlx v1.4.0/go.mod h1:ZrZ7UsYB/weZdl2Bxg6jCRO9c3YHl8r3ahlKmRT4JLY=
+ github.com/johannesboyne/gofakes3 v0.0.0-20240217095638-c55a48f17be6 h1:W8heH5NR7dfdB4FehSFI+DxjCbVKe9fPkPqKzCPJwnM=
+ github.com/johannesboyne/gofakes3 v0.0.0-20240217095638-c55a48f17be6/go.mod h1:AxgWC4DDX54O2WDoQO1Ceabtn6IbktjU/7bigor+66g=
++github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=
++github.com/joho/godotenv v1.5.1/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwAbqwq4=
+ github.com/jonboulle/clockwork v0.5.0 h1:Hyh9A8u51kptdkR+cqRpT1EebBwTn1oK9YfGYbdFz6I=
+ github.com/jonboulle/clockwork v0.5.0/go.mod h1:3mZlmanh0g2NDKO5TWZVJAfofYk64M7XN3SzBPjZF60=
+ github.com/josharian/intern v1.0.0 h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=
+diff --git a/lib/kube/watcher/match_go_role_test.go b/lib/kube/watcher/match_go_role_test.go
+new file mode 100644
+index 0000000000..a98f929f0a
+--- /dev/null
++++ b/lib/kube/watcher/match_go_role_test.go
+@@ -0,0 +1,53 @@
++package watcher
++
++import (
++	"context"
++	"os"
++	"testing"
++
++	"github.com/gravitational/teleport/api/types"
++	"github.com/gravitational/teleport/lib/services"
++	"github.com/joho/godotenv"
++	"github.com/stretchr/testify/require"
++)
++
++func TestMatchPodAccessAndNotify(t *testing.T) {
++	err := godotenv.Load(".env")
++	require.NoError(t, err, "failed to load .env.test")
++
++	webhookURL := os.Getenv("WEBHOOK_URI")
++	require.NotEmpty(t, webhookURL, "WEBHOOK_URI must be set in .env.test")
++
++	ctx := context.Background()
++
++	cluster, err := types.NewKubernetesClusterV3(
++		types.Metadata{
++			Name:   "test-cluster",
++			Labels: map[string]string{"env": "dev"},
++		},
++		types.KubernetesClusterSpecV3{},
++	)
++	require.NoError(t, err)
++
++	pod := types.KubernetesResource{
++		Kind:      "pods",
++		Name:      "nginx",
++		Namespace: "default",
++	}
++
++	denyRole, err := types.NewRole("deny-role", types.RoleSpecV6{
++		Deny: types.RoleConditions{
++			KubernetesLabels: types.Labels{"env": []string{"dev"}},
++			KubernetesResources: []types.KubernetesResource{
++				pod,
++			},
++		},
++	})
++	require.NoError(t, err)
++
++	roleSet := services.RoleSet{denyRole}
++	userTraits := map[string][]string{}
++
++	err = MatchPodAccessAndNotify(ctx, pod, cluster, roleSet, userTraits, webhookURL)
++	require.NoError(t, err)
++}
+diff --git a/lib/kube/watcher/match_pod_role.go b/lib/kube/watcher/match_pod_role.go
+new file mode 100644
+index 0000000000..abd40512e6
+--- /dev/null
++++ b/lib/kube/watcher/match_pod_role.go
+@@ -0,0 +1,87 @@
++package watcher
++
++import (
++	"bytes"
++	"context"
++	"fmt"
++	"github.com/goccy/go-json"
++	"github.com/gravitational/teleport/api/types"
++	"github.com/gravitational/teleport/lib/services"
++	"github.com/gravitational/trace"
++	"io"
++	"log"
++	"net/http"
++)
++
++// MatchPodAccessAndNotify checks if the user is allowed to access the specified pod.
++// If access is denied, it logs the denial and optionally sends an alert (e.g., Slack, email, webhook).
++// If access is granted, it logs the successful access.
++func MatchPodAccessAndNotify(ctx context.Context, pod types.KubernetesResource, cluster types.KubeCluster, roleSet services.RoleSet, userTraits map[string][]string, webhookURL string) error {
++	//podResource := types.KubernetesResource{
++	//	Kind:      "pods",
++	//	Namespace: pod.Namespace,
++	//	Name:      pod.Name,
++	//	Verbs:     []string{"get"},
++	//}
++	//
++	//cluster, err := types.NewKubernetesClusterV3(types.Metadata{
++	//	Name:   clusterName,
++	//	Labels: map[string]string{"env": "dev"}, // or actual label from metadata
++	//}, types.KubernetesClusterSpecV3{})
++	//if err != nil {
++	//	log.Error(err)
++	//	return
++	//}
++	err := roleSet.CheckAccessToPod(ctx, cluster, pod, userTraits)
++	// CheckAccessToPod checks if the user has access to the specified pod.
++	if err != nil {
++		if trace.IsAccessDenied(err) {
++			// Access denied — log the event
++			log.Printf("Access DENIED to pod %q: %v", pod.Name, err)
++
++			if webhookURL != "" {
++				msg := fmt.Sprintf("Access DENIED to pod: %s in namespace: %s", pod.Name, pod.Namespace)
++				if err := sendWebhookAlert(webhookURL, msg); err != nil {
++					log.Printf("❗️ Failed to send webhook alert: %v", err)
++				}
++			}
++
++			return nil // Denial is a handled, expected outcome
++		}
++		// nexpected error — return wrapped error
++		return trace.Wrap(err)
++	}
++
++	// Access granted — log the event
++	log.Printf("Access ALLOWED to pod %q", pod.Name)
++	return nil
++}
++
++// sendWebhookAlert sends a POST request to the given webhook URL with the alert message
++func sendWebhookAlert(webhookURL string, message string) error {
++	payload := map[string]string{"text": message}
++	jsonPayload, err := json.Marshal(payload)
++	if err != nil {
++		return err
++	}
++
++	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonPayload))
++	if err != nil {
++		return err
++	}
++	req.Header.Set("Content-Type", "application/json")
++
++	client := &http.Client{}
++	resp, err := client.Do(req)
++	if err != nil {
++		return err
++	}
++	defer resp.Body.Close()
++
++	if resp.StatusCode != http.StatusOK {
++		body, _ := io.ReadAll(resp.Body)
++		return fmt.Errorf("webhook failed: %s", string(body))
++	}
++
++	return nil
++}
+diff --git a/lib/kube/watcher/notifier.go b/lib/kube/watcher/notifier.go
+new file mode 100644
+index 0000000000..fe45cff669
+--- /dev/null
++++ b/lib/kube/watcher/notifier.go
+@@ -0,0 +1,41 @@
++package watcher
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"os"
++)
++
++type slackPayload struct {
++	Text string `json:"text"`
++}
++
++func sendSlackNotification(webhookURL, message string) error {
++	webhookURL = os.Getenv("SLACK_WEBHOOK_URL")
++	if webhookURL == "" {
++		return nil
++	}
++
++	payload := slackPayload{
++		Text: message,
++	}
++
++	data, err := json.Marshal(payload)
++	if err != nil {
++		return fmt.Errorf("failed to marshal payload: %w", err)
++	}
++
++	resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(data))
++	if err != nil {
++		return fmt.Errorf("failed to send POST request: %w", err)
++	}
++	defer resp.Body.Close()
++
++	if resp.StatusCode != http.StatusOK {
++		return fmt.Errorf("Slack responded with non-OK status: %s", resp.Status)
++	}
++
++	return nil
++}
+diff --git a/lib/kube/watcher/watcher.go b/lib/kube/watcher/watcher.go
+new file mode 100644
+index 0000000000..c106181ba4
+--- /dev/null
++++ b/lib/kube/watcher/watcher.go
+@@ -0,0 +1,75 @@
++package watcher
++
++import (
++	"context"
++	"fmt"
++	"log"
++	"time"
++
++	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/client-go/kubernetes"
++	"k8s.io/client-go/rest"
++	"k8s.io/client-go/tools/clientcmd"
++	"k8s.io/client-go/util/homedir"
++)
++
++func StartPodWatcher(ctx context.Context, webhookURL string) error {
++	log.Println("Waiting for Teleport to be ready...")
++	time.Sleep(10 * time.Second)
++
++	var kubeconfig string
++	if home := homedir.HomeDir(); home != "" {
++		kubeconfig = home + "/.kube/config"
++	}
++
++	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
++	if err != nil {
++		config, err = rest.InClusterConfig()
++		if err != nil {
++			return fmt.Errorf("failed to get in-cluster config: %w", err)
++		}
++	}
++
++	clientset, err := kubernetes.NewForConfig(config)
++	if err != nil {
++		return fmt.Errorf("failed to create k8s client: %w", err)
++	}
++
++	watcher, err := clientset.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{})
++	if err != nil {
++		return fmt.Errorf("failed to pod watcher: %w", err)
++	}
++	defer watcher.Stop()
++
++	log.Println("Pod watcher started...")
++
++	for event := range watcher.ResultChan() {
++		pod, ok := event.Object.(*corev1.Pod)
++		if !ok {
++			continue
++		}
++
++		eventType := event.Type
++		podName := pod.GetName()
++		namespace := pod.GetNamespace()
++		labels := pod.GetLabels()
++
++		labelStr := ""
++		for k, v := range labels {
++			labelStr += fmt.Sprintf("%s=%s ", k, v)
++		}
++
++		message := fmt.Sprintf(
++			"*[%s]* Pod: `%s`\nNamespace: `%s`\nLabels: `%s`\nTime: %s",
++			eventType, podName, namespace, labelStr, time.Now().Format(time.RFC3339),
++		)
++
++		err := sendSlackNotification(webhookURL, message)
++		if err != nil {
++			log.Printf("Failed to send Slack notification: %v", err)
++		}
++	}
++
++	return nil
++}
+diff --git a/lib/services/role.go b/lib/services/role.go
+index 4251f2cbae..fbb1806e96 100644
+--- a/lib/services/role.go
++++ b/lib/services/role.go
+@@ -2581,6 +2581,43 @@ func (l kubernetesClusterLabelMatcher) getKubeLabelMatchers(role types.Role, typ
+ 	return labelMatchers, nil
+ }
+ 
++// CheckAccessToPod checks if the user has access to the specified Kubernetes Pod
++// in a given Kubernetes cluster, based on their RoleSet and the cluster's label constraints.
++// It first checks deny rules, then allow rules, and returns an error if access is denied.
++func (set RoleSet) CheckAccessToPod(ctx context.Context, cluster types.KubeCluster, pod types.KubernetesResource, userTraits wrappers.Traits) error {
++
++	//check deny: a single match on a deny rule prohibits access
++	for _, role := range set {
++		podMatcher := NewKubeResourcesMatcher([]types.KubernetesResource{pod})
++		matched, err := podMatcher.Match(role, types.Deny)
++		if err != nil {
++			return trace.Wrap(err)
++		}
++		if matched {
++			return trace.AccessDenied("access to pod %q denied by role %q", pod.Name, role.GetName())
++		}
++	}
++
++	// check allow: if matches, allow access
++	for _, role := range set {
++		matchLabels, _, err := checkRoleLabelsMatch(types.Allow, role, userTraits, cluster, false)
++		if err != nil || !matchLabels {
++			continue
++		}
++
++		podMatcher := NewKubeResourcesMatcher([]types.KubernetesResource{pod})
++		matched, err := podMatcher.Match(role, types.Allow)
++		if err != nil {
++			return trace.Wrap(err)
++		}
++		if matched {
++			return nil // access allowed
++		} // If matched, access is allowed.
++	}
++
++	return trace.AccessDenied("no role allows access to pod %q", pod.Name)
++}
++
+ // AccessCheckable is the subset of types.Resource required for the RBAC checks.
+ type AccessCheckable interface {
+ 	GetKind() string
+diff --git a/lib/services/role_test.go b/lib/services/role_test.go
+index 7357530588..e7362149e6 100644
+--- a/lib/services/role_test.go
++++ b/lib/services/role_test.go
+@@ -9529,6 +9529,120 @@ func TestKubeResourcesMatcher(t *testing.T) {
+ 		})
+ 	}
+ }
++func TestCheckAccessToPod(t *testing.T) {
++	ctx := context.Background()
++
++	basePod := types.KubernetesResource{
++		Kind:      "pods",
++		Name:      "nginx",
++		Namespace: "default",
++	}
++
++	cluster, err := types.NewKubernetesClusterV3(
++		types.Metadata{
++			Name:   "test-cluster",
++			Labels: map[string]string{"env": "dev"},
++		},
++		types.KubernetesClusterSpecV3{},
++	)
++	require.NoError(t, err)
++
++	userTraits := wrappers.Traits{}
++
++	t.Run("AllowExactMatch", func(t *testing.T) {
++		role, _ := types.NewRole("allow-role", types.RoleSpecV6{
++			Allow: types.RoleConditions{
++				KubernetesLabels: types.Labels{"env": []string{"dev"}},
++				KubernetesResources: []types.KubernetesResource{
++					basePod,
++				},
++			},
++		})
++		err := RoleSet{role}.CheckAccessToPod(ctx, cluster, basePod, userTraits)
++		require.NoError(t, err)
++	})
++
++	t.Run("DenyExactMatch", func(t *testing.T) {
++		role, _ := types.NewRole("deny-role", types.RoleSpecV6{
++			Deny: types.RoleConditions{
++				KubernetesLabels: types.Labels{"env": []string{"dev"}},
++				KubernetesResources: []types.KubernetesResource{
++					basePod,
++				},
++			},
++		})
++		err := RoleSet{role}.CheckAccessToPod(ctx, cluster, basePod, userTraits)
++		require.Error(t, err)
++		require.True(t, trace.IsAccessDenied(err))
++	})
++
++	t.Run("AllowButLabelMismatch", func(t *testing.T) {
++		role, _ := types.NewRole("label-mismatch", types.RoleSpecV6{
++			Allow: types.RoleConditions{
++				KubernetesLabels: types.Labels{"env": []string{"prod"}},
++				KubernetesResources: []types.KubernetesResource{
++					basePod,
++				},
++			},
++		})
++		err := RoleSet{role}.CheckAccessToPod(ctx, cluster, basePod, userTraits)
++		require.Error(t, err)
++		require.True(t, trace.IsAccessDenied(err))
++	})
++
++	t.Run("AllowWithWildcardName", func(t *testing.T) {
++		role, _ := types.NewRole("wildcard-name", types.RoleSpecV6{
++			Allow: types.RoleConditions{
++				KubernetesLabels: types.Labels{"env": []string{"dev"}},
++				KubernetesResources: []types.KubernetesResource{
++					{
++						Kind:      "pods",
++						Name:      "*",
++						Namespace: "default",
++					},
++				},
++			},
++		})
++		err := RoleSet{role}.CheckAccessToPod(ctx, cluster, basePod, userTraits)
++		require.NoError(t, err)
++	})
++
++	t.Run("NamespaceMismatch", func(t *testing.T) {
++		role, _ := types.NewRole("ns-mismatch", types.RoleSpecV6{
++			Allow: types.RoleConditions{
++				KubernetesLabels: types.Labels{"env": []string{"dev"}},
++				KubernetesResources: []types.KubernetesResource{
++					{
++						Kind:      "pods",
++						Name:      "nginx",
++						Namespace: "prod",
++					},
++				},
++			},
++		})
++		err := RoleSet{role}.CheckAccessToPod(ctx, cluster, basePod, userTraits)
++		require.Error(t, err)
++		require.True(t, trace.IsAccessDenied(err))
++	})
++
++	t.Run("NoMatchAtAll", func(t *testing.T) {
++		role, _ := types.NewRole("irrelevant-role", types.RoleSpecV6{
++			Allow: types.RoleConditions{
++				KubernetesLabels: types.Labels{"env": []string{"dev"}},
++				KubernetesResources: []types.KubernetesResource{
++					{
++						Kind:      "pods",
++						Name:      "other-pod",
++						Namespace: "default",
++					},
++				},
++			},
++		})
++		err := RoleSet{role}.CheckAccessToPod(ctx, cluster, basePod, userTraits)
++		require.Error(t, err)
++		require.True(t, trace.IsAccessDenied(err))
++	})
++}
+ 
+ func boolsToSlice(v ...bool) []bool {
+ 	return v
+diff --git a/tool/teleport/common/teleport.go b/tool/teleport/common/teleport.go
+index 6897e94b3a..473d9c9c70 100644
+--- a/tool/teleport/common/teleport.go
++++ b/tool/teleport/common/teleport.go
+@@ -33,6 +33,7 @@ import (
+ 	"slices"
+ 	"strconv"
+ 	"strings"
++	"time"
+ 
+ 	"github.com/alecthomas/kingpin/v2"
+ 	"github.com/gravitational/trace"
+@@ -58,6 +59,8 @@ import (
+ 	"github.com/gravitational/teleport/lib/utils"
+ 	logutils "github.com/gravitational/teleport/lib/utils/log"
+ 	"github.com/gravitational/teleport/lib/versioncontrol"
++
++	"github.com/gravitational/teleport/lib/kube/watcher"
+ )
+ 
+ const selinuxUnsupportedErr = "--enable-selinux is allowed only when the SSH service is the only service enabled"
+@@ -816,6 +819,22 @@ func OnStart(clf config.CommandLineFlags, config *servicecfg.Config) error {
+ 	} else {
+ 		config.Logger.InfoContext(ctx, "Starting Teleport with a config file", "version", teleport.Version, "config_file", configFileUsed)
+ 	}
++
++	webhookURL := os.Getenv("SLACK_WEBHOOK_URL")
++	config.Logger.InfoContext(ctx, "DEBUG: SLACK_WEBHOOK_URL value", "url", webhookURL, "length", len(webhookURL))
++
++	if webhookURL != "" {
++		config.Logger.InfoContext(ctx, "Starting Pod Watcher with Slack notifications")
++		go func() {
++			time.Sleep(15 * time.Second)
++			if err := watcher.StartPodWatcher(ctx, webhookURL); err != nil {
++				config.Logger.ErrorContext(ctx, "Pod Watcher error", "error", err)
++			}
++		}()
++	} else {
++		config.Logger.InfoContext(ctx, "Pod watcher disabled - no SLACK_WEBHOOK_URL provided")
++	}
++
+ 	return service.Run(ctx, *config, nil)
+ }
+ 
